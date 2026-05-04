@@ -1530,6 +1530,7 @@ def team_status(
     team: str = typer.Argument(..., help="Team name"),
 ):
     """Show team status and members."""
+    from clawteam.spawn.registry import get_lifecycle_counts
     from clawteam.team.manager import TeamManager
 
     config = TeamManager.get_team(team)
@@ -1543,6 +1544,8 @@ def team_status(
         "leadAgentId": config.lead_agent_id,
         "createdAt": config.created_at,
         "members": [m.model_dump(by_alias=True) for m in config.members],
+        # Decision: ND-363 (team status exposes running vs suspended counts for seat accounting)
+        "workerLifecycle": get_lifecycle_counts(team),
     }
 
     def _human(d):
@@ -1550,6 +1553,15 @@ def team_status(
         if d['description']:
             console.print(f"  {d['description']}")
         console.print(f"  Created: {format_timestamp(d['createdAt'])}")
+        lifecycle = d.get("workerLifecycle", {})
+        if lifecycle:
+            console.print(
+                "  Workers: "
+                f"running={lifecycle.get('running', 0)} "
+                f"suspended={lifecycle.get('suspended', 0)} "
+                f"completed={lifecycle.get('completed', 0)} "
+                f"active_seats={lifecycle.get('active_seats', 0)}"
+            )
         has_user = any(m.get("user") for m in d["members"])
         table = Table(title="Members")
         table.add_column("Name", style="cyan")
@@ -2856,6 +2868,109 @@ def lifecycle_idle(
     )
 
 
+@lifecycle_app.command("state")
+def lifecycle_state(
+    team: str = typer.Option(..., "--team", "-t", help="Team name"),
+    agent: str = typer.Option(..., "--agent", "-n", help="Agent name"),
+):
+    """Show a worker lifecycle state record."""
+    from clawteam.spawn.registry import get_agent_lifecycle
+
+    state = get_agent_lifecycle(team, agent)
+    if state is None:
+        _output({"error": f"No lifecycle state for '{agent}'"}, lambda d: console.print(f"[red]{d['error']}[/red]"))
+        raise typer.Exit(1)
+    _output(state, lambda d: console.print(
+        f"{agent}: [cyan]{d.get('worker_state', '')}[/cyan]"
+        f" transition={d.get('transition', '') or '-'}"
+        f" seat_released={d.get('seat_released', False)}"
+    ))
+
+
+@lifecycle_app.command("suspend")
+def lifecycle_suspend(
+    team: str = typer.Option(..., "--team", "-t", help="Team name"),
+    agent: str = typer.Option(..., "--agent", "-n", help="Agent name"),
+    blocking_condition: str = typer.Option("", "--blocking-condition", help="Human-readable blocking condition"),
+    expected_revive_signal: str = typer.Option("ResumeDispatch", "--expected-revive-signal", help="Expected resume signal contract"),
+    wait_request_id: str = typer.Option("", "--wait-request-id", help="wait_request identifier from the blocking contract"),
+    correlation_id: str = typer.Option("", "--correlation-id", help="MACP/bridge correlation identifier"),
+    target_dispatch_request_id: str = typer.Option("", "--target-dispatch-request-id", help="DispatchRequest identifier to resume"),
+    target_agent_ref: str = typer.Option("", "--target-agent-ref", help="Agent reference expected in ResumeDispatch"),
+):
+    """Suspend a running worker without killing its tmux pane."""
+    from clawteam.spawn.registry import LifecycleStateError, suspend_agent
+
+    try:
+        state = suspend_agent(
+            team,
+            agent,
+            blocking_condition=blocking_condition,
+            expected_revive_signal=expected_revive_signal,
+            wait_request_id=wait_request_id,
+            correlation_id=correlation_id,
+            target_dispatch_request_id=target_dispatch_request_id,
+            target_agent_ref=target_agent_ref,
+        )
+    except LifecycleStateError as e:
+        _output({"error": str(e)}, lambda d: console.print(f"[red]{d['error']}[/red]"))
+        raise typer.Exit(1)
+
+    _output(state, lambda d: console.print(
+        f"[green]OK[/green] Suspended '{agent}' "
+        f"(wait_request_id={d.get('wait_request_id') or '-'})"
+    ))
+
+
+@lifecycle_app.command("resume")
+def lifecycle_resume(
+    team: str = typer.Option(..., "--team", "-t", help="Team name"),
+    agent: str = typer.Option(..., "--agent", "-n", help="Agent name"),
+    wake_reason: str = typer.Option("", "--wake-reason", help="ResumeDispatch wake_reason"),
+    correlation_id: str = typer.Option("", "--correlation-id", help="MACP/bridge correlation identifier"),
+    target_dispatch_request_id: str = typer.Option("", "--target-dispatch-request-id", help="DispatchRequest identifier to resume"),
+    target_agent_ref: str = typer.Option("", "--target-agent-ref", help="Agent reference expected in ResumeDispatch"),
+    resume_dispatch_json: Optional[str] = typer.Option(None, "--resume-dispatch-json", help="ResumeDispatch JSON string or path"),
+):
+    """Resume a suspended worker from a ResumeDispatch-compatible signal."""
+    from clawteam.spawn.registry import LifecycleStateError, resume_agent
+
+    # Decision: ND-363 (bridge-contract integration accepts ResumeDispatch-shaped JSON without hard-coding neurow-bridge as a dependency)
+    if resume_dispatch_json:
+        payload = _load_json_argument(resume_dispatch_json)
+        wake_reason = str(payload.get("wake_reason", wake_reason) or "")
+        correlation_id = str(payload.get("correlation_id", correlation_id) or "")
+        target_dispatch_request_id = str(
+            payload.get("target_dispatch_request_id", target_dispatch_request_id) or ""
+        )
+        target_agent_ref = str(payload.get("target_agent_ref", target_agent_ref) or "")
+
+    try:
+        state = resume_agent(
+            team,
+            agent,
+            wake_reason=wake_reason,
+            correlation_id=correlation_id,
+            target_dispatch_request_id=target_dispatch_request_id,
+            target_agent_ref=target_agent_ref,
+        )
+    except LifecycleStateError as e:
+        _output({"error": str(e)}, lambda d: console.print(f"[red]{d['error']}[/red]"))
+        raise typer.Exit(1)
+
+    _output(state, lambda d: console.print(
+        f"[green]OK[/green] Resumed '{agent}' "
+        f"(wake_reason={d.get('wake_reason') or wake_reason or '-'})"
+    ))
+
+
+def _load_json_argument(value: str) -> dict:
+    path = Path(value).expanduser()
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(value)
+
+
 @lifecycle_app.command("on-exit")
 def lifecycle_on_exit(
     team: str = typer.Option(..., "--team", "-t", help="Team name"),
@@ -2865,6 +2980,7 @@ def lifecycle_on_exit(
 
     This is called automatically as a post-exit hook when an agent process terminates.
     """
+    from clawteam.spawn.registry import mark_agent_completed
     from clawteam.spawn.sessions import SessionStore
     from clawteam.team.mailbox import MailboxManager
     from clawteam.team.manager import TeamManager
@@ -2883,6 +2999,7 @@ def lifecycle_on_exit(
     # Without this, session files accumulate indefinitely under
     # ~/.clawteam/sessions/{team}/ after every agent exit.
     SessionStore(team).clear(agent)
+    mark_agent_completed(team, agent, reason="on-exit")
 
     store = TaskStore(team)
     tasks = store.list_tasks()
