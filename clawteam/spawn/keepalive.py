@@ -61,14 +61,55 @@ def build_keepalive_shell_command(
 ) -> str:
     """Build a POSIX shell command that keeps resumable agents alive."""
     cmd_str = " ".join(shlex.quote(c) for c in initial_command)
+    command_marker = f": {cmd_str}; "
     exit_cmd = shlex.quote(clawteam_bin) if clawteam_bin.startswith("/") else clawteam_bin
     exit_hook = (
         f'CLAWTEAM_EXIT_CODE="$__ct_status" {exit_cmd} lifecycle on-exit '
         f'--team {shlex.quote(team_name)} --agent {shlex.quote(agent_name)}'
     )
+    killed_hook = (
+        f'CLAWTEAM_EXIT_CODE="$__ct_status" {exit_cmd} lifecycle parent-killed '
+        f'--team {shlex.quote(team_name)} --agent {shlex.quote(agent_name)} '
+        '--signal "$__ct_signal" --pid "$$"'
+    )
+    lifecycle_hook = exit_hook
+    signal_prelude = (
+        "set -m 2>/dev/null || true; __ct_child_pid=; "
+        '__ct_run_cmd() { sh -c "exec $1" & __ct_child_pid=$!; '
+        'while kill -0 "$__ct_child_pid" 2>/dev/null; do sleep 0.1; done; '
+        'wait "$__ct_child_pid"; __ct_status=$?; __ct_child_pid=; '
+        'return "$__ct_status"; }; '
+        '__ct_forward_signal() { __ct_signal="$1"; __ct_status="$2"; '
+        'if [ -n "${__ct_child_pid:-}" ]; then '
+        'kill "-$__ct_signal" "-$__ct_child_pid" 2>/dev/null || '
+        'kill "-$__ct_signal" "$__ct_child_pid" 2>/dev/null || true; '
+        'wait "$__ct_child_pid"; __ct_wait_status=$?; __ct_child_pid=; '
+        'if [ "$__ct_wait_status" -ne 127 ]; then __ct_status="$__ct_wait_status"; fi; '
+        "fi; "
+        f"{killed_hook}; "
+        'exit "$__ct_status"; }; '
+        '__ct_forward_control_signal() { __ct_signal="$1"; '
+        'if [ -n "${__ct_child_pid:-}" ]; then '
+        'kill "-$__ct_signal" "-$__ct_child_pid" 2>/dev/null || '
+        'kill "-$__ct_signal" "$__ct_child_pid" 2>/dev/null || true; '
+        "fi; "
+        'if [ "$__ct_signal" = "TSTP" ]; then '
+        "trap - TSTP; kill -TSTP \"$$\"; "
+        "trap '__ct_forward_control_signal TSTP' TSTP; "
+        "fi; }; "
+        "trap '__ct_forward_signal TERM 143' TERM; "
+        "trap '__ct_forward_signal HUP 129' HUP; "
+        "trap '__ct_forward_signal INT 130' INT; "
+        "trap '__ct_forward_control_signal TSTP' TSTP; "
+        "trap '__ct_forward_control_signal CONT' CONT;"
+    )
 
     if not keepalive or not resume_command:
-        return f"{cmd_str}; __ct_status=$?; {exit_hook}; exit $__ct_status"
+        return (
+            f"{signal_prelude} {command_marker}__ct_cmd={shlex.quote(cmd_str)}; "
+            '__ct_run_cmd "$__ct_cmd"; __ct_status=$?; '
+            f"{lifecycle_hook}; exit $__ct_status"
+        )
 
     resume_str = " ".join(shlex.quote(c) for c in resume_command)
     should_keepalive = (
@@ -77,15 +118,17 @@ def build_keepalive_shell_command(
     )
 
     return (
+        f"{signal_prelude} "
+        f"{command_marker}"
         f'__ct_cmd={shlex.quote(cmd_str)}; '
         f'__ct_resume={shlex.quote(resume_str)}; '
         "while true; do "
-        'eval "$__ct_cmd"; '
+        '__ct_run_cmd "$__ct_cmd"; '
         "__ct_status=$?; "
-        f"{exit_hook}; "
         'if [ "$__ct_status" -eq 0 ] && '
         f"{should_keepalive}; "
         'then __ct_cmd="$__ct_resume"; sleep 1; continue; fi; '
+        f"{lifecycle_hook}; "
         "exit $__ct_status; "
         "done"
     )

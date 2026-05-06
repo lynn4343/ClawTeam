@@ -686,6 +686,20 @@ clawteam plan reject <team> <plan-id> <agent> --feedback "Revise X"
 clawteam lifecycle request-shutdown <team> <agent> --reason "done"
 clawteam lifecycle approve-shutdown <team> <request-id> <agent>
 clawteam lifecycle idle <team>
+clawteam orphan-list --team <team>                 # stale running sessions with no live worker
+clawteam orphan-clear --team <team> --dry-run      # preview cleanup
+clawteam orphan-clear --team <team> --execute      # mark stale orphans killed-by-reaper
+clawteam reap --team <team>                        # reap orphans + archive old terminal registry rows
+clawteam reaper install-launchd                    # macOS dry-run: per-user 15-minute LaunchAgent plist
+clawteam reaper install-launchd --execute          # macOS: write per-user plist; bootstrap is explicit
+clawteam reaper bootstrap-launchd --execute        # macOS: load installed per-user LaunchAgent
+clawteam reaper status-launchd                     # macOS/read-only: inspect plist + launchctl state
+clawteam reaper bootout-launchd --execute          # macOS rollback: unload per-user LaunchAgent
+clawteam reaper uninstall-launchd --execute        # macOS rollback: remove per-user plist
+
+# LaunchAgent example: install -> bootstrap; teardown -> bootout -> uninstall
+clawteam reaper install-launchd --execute && clawteam reaper bootstrap-launchd --execute
+clawteam reaper bootout-launchd --execute && clawteam reaper uninstall-launchd --execute
 
 # 🎪 Templates
 clawteam launch <template> --team <name> --goal "Build X"
