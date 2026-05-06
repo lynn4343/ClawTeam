@@ -278,14 +278,18 @@ class TmuxBackend(SpawnBackend):
 
         # Capture pane PID for robust liveness checking (survives tile operations)
         pane_pid = 0
+        pane_id = ""
         pid_result = subprocess.run(
-            ["tmux", "list-panes", "-t", target, "-F", "#{pane_pid}"],
+            ["tmux", "list-panes", "-t", target, "-F", "#{pane_id} #{pane_pid}"],
             capture_output=True, text=True,
         )
         if pid_result.returncode == 0 and pid_result.stdout.strip():
+            parts = pid_result.stdout.strip().splitlines()[0].split()
+            if parts:
+                pane_id = parts[0]
             try:
-                pane_pid = int(pid_result.stdout.strip().splitlines()[0])
-            except ValueError:
+                pane_pid = int(parts[1] if len(parts) > 1 else "0")
+            except (ValueError, IndexError):
                 pass
 
         # Persist spawn info for liveness checking
@@ -295,6 +299,7 @@ class TmuxBackend(SpawnBackend):
             agent_name=agent_name,
             backend="tmux",
             tmux_target=target,
+            tmux_pane_id=pane_id,
             pid=pane_pid,
             command=list(final_command),
         )

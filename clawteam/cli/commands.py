@@ -1530,6 +1530,7 @@ def team_status(
     team: str = typer.Argument(..., help="Team name"),
 ):
     """Show team status and members."""
+    from clawteam.spawn.registry import get_lifecycle_counts
     from clawteam.team.manager import TeamManager
 
     config = TeamManager.get_team(team)
@@ -1543,6 +1544,8 @@ def team_status(
         "leadAgentId": config.lead_agent_id,
         "createdAt": config.created_at,
         "members": [m.model_dump(by_alias=True) for m in config.members],
+        # Decision: ND-363 (team status exposes running vs suspended counts for seat accounting)
+        "workerLifecycle": get_lifecycle_counts(team),
     }
 
     def _human(d):
@@ -1550,6 +1553,15 @@ def team_status(
         if d['description']:
             console.print(f"  {d['description']}")
         console.print(f"  Created: {format_timestamp(d['createdAt'])}")
+        lifecycle = d.get("workerLifecycle", {})
+        if lifecycle:
+            console.print(
+                "  Workers: "
+                f"running={lifecycle.get('running', 0)} "
+                f"suspended={lifecycle.get('suspended', 0)} "
+                f"completed={lifecycle.get('completed', 0)} "
+                f"active_seats={lifecycle.get('active_seats', 0)}"
+            )
         has_user = any(m.get("user") for m in d["members"])
         table = Table(title="Members")
         table.add_column("Name", style="cyan")
@@ -2856,22 +2868,121 @@ def lifecycle_idle(
     )
 
 
-@lifecycle_app.command("on-exit")
-def lifecycle_on_exit(
+@lifecycle_app.command("state")
+def lifecycle_state(
     team: str = typer.Option(..., "--team", "-t", help="Team name"),
     agent: str = typer.Option(..., "--agent", "-n", help="Agent name"),
 ):
-    """Handle agent process exit: clean up session and reset in_progress tasks.
+    """Show a worker lifecycle state record."""
+    from clawteam.spawn.registry import get_agent_lifecycle
 
-    This is called automatically as a post-exit hook when an agent process terminates.
-    """
-    from clawteam.spawn.sessions import SessionStore
+    state = get_agent_lifecycle(team, agent)
+    if state is None:
+        _output({"error": f"No lifecycle state for '{agent}'"}, lambda d: console.print(f"[red]{d['error']}[/red]"))
+        raise typer.Exit(1)
+    _output(state, lambda d: console.print(
+        f"{agent}: [cyan]{d.get('worker_state', '')}[/cyan]"
+        f" transition={d.get('transition', '') or '-'}"
+        f" seat_released={d.get('seat_released', False)}"
+    ))
+
+
+@lifecycle_app.command("suspend")
+def lifecycle_suspend(
+    team: str = typer.Option(..., "--team", "-t", help="Team name"),
+    agent: str = typer.Option(..., "--agent", "-n", help="Agent name"),
+    blocking_condition: str = typer.Option("", "--blocking-condition", help="Human-readable blocking condition"),
+    expected_revive_signal: str = typer.Option("ResumeDispatch", "--expected-revive-signal", help="Expected resume signal contract"),
+    wait_request_id: str = typer.Option("", "--wait-request-id", help="wait_request identifier from the blocking contract"),
+    correlation_id: str = typer.Option("", "--correlation-id", help="MACP/bridge correlation identifier"),
+    target_dispatch_request_id: str = typer.Option("", "--target-dispatch-request-id", help="DispatchRequest identifier to resume"),
+    target_agent_ref: str = typer.Option("", "--target-agent-ref", help="Agent reference expected in ResumeDispatch"),
+):
+    """Suspend a running worker without killing its tmux pane."""
+    from clawteam.spawn.registry import LifecycleStateError, suspend_agent
+
+    try:
+        state = suspend_agent(
+            team,
+            agent,
+            blocking_condition=blocking_condition,
+            expected_revive_signal=expected_revive_signal,
+            wait_request_id=wait_request_id,
+            correlation_id=correlation_id,
+            target_dispatch_request_id=target_dispatch_request_id,
+            target_agent_ref=target_agent_ref,
+        )
+    except LifecycleStateError as e:
+        _output({"error": str(e)}, lambda d: console.print(f"[red]{d['error']}[/red]"))
+        raise typer.Exit(1)
+
+    _output(state, lambda d: console.print(
+        f"[green]OK[/green] Suspended '{agent}' "
+        f"(wait_request_id={d.get('wait_request_id') or '-'})"
+    ))
+
+
+@lifecycle_app.command("resume")
+def lifecycle_resume(
+    team: str = typer.Option(..., "--team", "-t", help="Team name"),
+    agent: str = typer.Option(..., "--agent", "-n", help="Agent name"),
+    wake_reason: str = typer.Option("", "--wake-reason", help="ResumeDispatch wake_reason"),
+    correlation_id: str = typer.Option("", "--correlation-id", help="MACP/bridge correlation identifier"),
+    target_dispatch_request_id: str = typer.Option("", "--target-dispatch-request-id", help="DispatchRequest identifier to resume"),
+    target_agent_ref: str = typer.Option("", "--target-agent-ref", help="Agent reference expected in ResumeDispatch"),
+    resume_dispatch_json: Optional[str] = typer.Option(None, "--resume-dispatch-json", help="ResumeDispatch JSON string or path"),
+):
+    """Resume a suspended worker from a ResumeDispatch-compatible signal."""
+    from clawteam.spawn.registry import LifecycleStateError, resume_agent
+
+    # Decision: ND-363 (bridge-contract integration accepts ResumeDispatch-shaped JSON without hard-coding neurow-bridge as a dependency)
+    if resume_dispatch_json:
+        payload = _load_json_argument(resume_dispatch_json)
+        wake_reason = str(payload.get("wake_reason", wake_reason) or "")
+        correlation_id = str(payload.get("correlation_id", correlation_id) or "")
+        target_dispatch_request_id = str(
+            payload.get("target_dispatch_request_id", target_dispatch_request_id) or ""
+        )
+        target_agent_ref = str(payload.get("target_agent_ref", target_agent_ref) or "")
+
+    try:
+        state = resume_agent(
+            team,
+            agent,
+            wake_reason=wake_reason,
+            correlation_id=correlation_id,
+            target_dispatch_request_id=target_dispatch_request_id,
+            target_agent_ref=target_agent_ref,
+        )
+    except LifecycleStateError as e:
+        _output({"error": str(e)}, lambda d: console.print(f"[red]{d['error']}[/red]"))
+        raise typer.Exit(1)
+
+    _output(state, lambda d: console.print(
+        f"[green]OK[/green] Resumed '{agent}' "
+        f"(wake_reason={d.get('wake_reason') or wake_reason or '-'})"
+    ))
+
+
+def _load_json_argument(value: str) -> dict:
+    path = Path(value).expanduser()
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(value)
+
+
+def _run_agent_exit_cleanup(
+    team: str,
+    agent: str,
+    *,
+    mark_completed: bool,
+    completion_reason: str,
+) -> list:
     from clawteam.team.mailbox import MailboxManager
     from clawteam.team.manager import TeamManager
     from clawteam.team.models import TaskStatus
     from clawteam.team.tasks import TaskStore
 
-    # Write exit journal entry for conductor cross-process notification
     try:
         from clawteam.harness.exit_journal import FileExitJournal
         journal = FileExitJournal(team)
@@ -2879,27 +2990,22 @@ def lifecycle_on_exit(
     except Exception:
         pass
 
-    # Always clean up the agent's session file, regardless of task status.
-    # Without this, session files accumulate indefinitely under
-    # ~/.clawteam/sessions/{team}/ after every agent exit.
-    SessionStore(team).clear(agent)
+    if mark_completed:
+        from clawteam.spawn.registry import mark_agent_completed
+        mark_agent_completed(team, agent, reason=completion_reason)
 
     store = TaskStore(team)
     tasks = store.list_tasks()
-
-    # Find this agent's in_progress tasks and reset them
     abandoned = [
         t for t in tasks
         if t.owner == agent and t.status == TaskStatus.in_progress
     ]
-
     if not abandoned:
-        return
+        return []
 
     for t in abandoned:
         store.update(t.id, status=TaskStatus.pending)
 
-    # Notify leader
     leader_name = TeamManager.get_leader_name(team)
     if leader_name:
         mailbox = MailboxManager(team)
@@ -2911,7 +3017,6 @@ def lifecycle_on_exit(
                     f"Reset {len(abandoned)} task(s) to pending: {task_subjects}",
         )
 
-    # Emit WorkerExit event
     try:
         from clawteam.events.global_bus import get_event_bus
         from clawteam.events.types import WorkerExit
@@ -2922,10 +3027,30 @@ def lifecycle_on_exit(
     except Exception:
         pass
 
+    return abandoned
+
+
+@lifecycle_app.command("on-exit")
+def lifecycle_on_exit(
+    team: str = typer.Option(..., "--team", "-t", help="Team name"),
+    agent: str = typer.Option(..., "--agent", "-n", help="Agent name"),
+):
+    """Handle agent process exit: clean up session and reset in_progress tasks.
+
+    This is called automatically as a post-exit hook when an agent process terminates.
+    """
+    abandoned = _run_agent_exit_cleanup(
+        team,
+        agent,
+        mark_completed=True,
+        completion_reason="on-exit",
+    )
+
     _output(
         {
             "status": "agent_exited",
             "agent": agent,
+            "abandoned": bool(abandoned),
             "abandoned_tasks": [{"id": t.id, "subject": t.subject} for t in abandoned],
         },
         lambda d: console.print(
@@ -2977,6 +3102,42 @@ def lifecycle_on_crash(
         pass
 
 
+@lifecycle_app.command("parent-killed")
+def lifecycle_parent_killed(
+    team: str = typer.Option(..., "--team", "-t", help="Team name"),
+    agent: str = typer.Option(..., "--agent", "-n", help="Agent name"),
+    signal_name: str = typer.Option("", "--signal", help="Signal or signal-derived exit status"),
+    pid: int = typer.Option(0, "--pid", help="Expected worker parent PID identity"),
+):
+    """Release a worker seat after parent/shell/child signal termination."""
+    from clawteam.spawn.orphans import mark_parent_killed
+
+    state = mark_parent_killed(team, agent, signal_name=signal_name, pid=pid)
+    abandoned = []
+    if state is not None:
+        abandoned = _run_agent_exit_cleanup(
+            team,
+            agent,
+            mark_completed=False,
+            completion_reason="parent-killed",
+        )
+    _output(
+        {
+            "status": "parent_killed" if state is not None else "parent_killed_skipped",
+            "team": team,
+            "agent": agent,
+            "signal": signal_name,
+            "pid": pid,
+            "state": state or {},
+            "abandoned_tasks": [{"id": t.id, "subject": t.subject} for t in abandoned],
+        },
+        lambda d: console.print(
+            f"[yellow]{'Released' if d['status'] == 'parent_killed' else 'Skipped'}[/yellow] "
+            f"'{agent}' after parent-killed signal={signal_name or '-'}"
+        ),
+    )
+
+
 @lifecycle_app.command("check-zombies")
 def lifecycle_check_zombies(
     team: str = typer.Option(..., "--team", "-t", help="Team name"),
@@ -3015,6 +3176,204 @@ def lifecycle_check_zombies(
 
     _output({"team": team, "zombies": zombies}, _fmt)
     raise typer.Exit(1)
+
+
+# ============================================================================
+# Orphan Reaper Commands
+# ============================================================================
+
+reaper_app = typer.Typer(help="Stale worker reaper launchd management")
+app.add_typer(reaper_app, name="reaper")
+
+
+@app.command("orphan-list")
+def orphan_list(
+    team: Optional[str] = typer.Option(None, "--team", "-t", help="Team name (default: all teams)"),
+    max_age_minutes: float = typer.Option(30.0, "--max-age-minutes", help="Stale running threshold"),
+):
+    """List stale running workers with no live backing process."""
+    from clawteam.spawn.orphans import list_orphan_workers
+
+    orphans = list_orphan_workers(team, max_age_minutes=max_age_minutes)
+
+    def _human(items):
+        if not items:
+            console.print("[green]OK[/green] No orphan workers detected")
+            return
+        table = Table(title="Orphan Workers")
+        table.add_column("Team", style="cyan")
+        table.add_column("Agent", style="cyan")
+        table.add_column("Age min", justify="right")
+        table.add_column("Registry")
+        table.add_column("Session")
+        table.add_column("Reason")
+        for item in items:
+            table.add_row(
+                item["team"],
+                item["agent"],
+                str(item["age_minutes"]),
+                item.get("registry_state") or "-",
+                item.get("session_state") or "-",
+                item.get("reason") or "-",
+            )
+        console.print(table)
+
+    _output(orphans, _human)
+
+
+@app.command("orphan-clear")
+def orphan_clear(
+    team: Optional[str] = typer.Option(None, "--team", "-t", help="Team name (default: all teams)"),
+    max_age_minutes: float = typer.Option(30.0, "--max-age-minutes", help="Stale running threshold"),
+    dry_run: bool = typer.Option(True, "--dry-run/--execute", help="Preview by default; use --execute to mutate"),
+):
+    """Mark stale orphan workers killed-by-reaper. Defaults to dry-run."""
+    from clawteam.spawn.orphans import reap_orphan_workers
+
+    result = reap_orphan_workers(team, max_age_minutes=max_age_minutes, dry_run=dry_run)
+    _output(
+        result,
+        lambda d: console.print(
+            f"[green]OK[/green] {'Would reap' if d['dry_run'] else 'Reaped'} "
+            f"{d['reaped_count']} orphan worker(s)"
+        ),
+    )
+
+
+@app.command("reap")
+def reap(
+    team: Optional[str] = typer.Option(None, "--team", "-t", help="Team name (default: all teams)"),
+    max_age_minutes: float = typer.Option(30.0, "--max-age-minutes", help="Stale running threshold"),
+    registry_ttl_days: float = typer.Option(7.0, "--registry-ttl-days", help="Archive released terminal registry rows older than this"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview without mutating registry/session state"),
+):
+    """Reap stale orphan workers and safely archive old terminal registry rows."""
+    from clawteam.spawn.orphans import run_reaper
+
+    result = run_reaper(
+        team,
+        max_age_minutes=max_age_minutes,
+        registry_ttl_days=registry_ttl_days,
+        dry_run=dry_run,
+    )
+    _output(
+        result,
+        lambda d: console.print(
+            f"[green]OK[/green] {'Would reap' if d['dry_run'] else 'Reaped'} "
+            f"{d['reap']['reaped_count']} orphan worker(s); "
+            f"registry_archived={sum(item['archived_count'] for item in d['registry_gc'])}"
+        ),
+    )
+
+
+@reaper_app.command("install-launchd")
+def reaper_install_launchd(
+    execute: bool = typer.Option(False, "--execute", help="Write plist. Default is dry-run."),
+    clawteam_bin: Optional[str] = typer.Option(None, "--clawteam-bin", help="Absolute clawteam executable path"),
+    data_dir: Optional[str] = typer.Option(None, "--data-dir", help="CLAWTEAM_DATA_DIR for the scheduled job"),
+    interval_seconds: int = typer.Option(900, "--interval-seconds", help="launchd StartInterval"),
+    max_age_minutes: float = typer.Option(30.0, "--max-age-minutes", help="Stale running threshold"),
+    registry_ttl_days: float = typer.Option(7.0, "--registry-ttl-days", help="Registry archive TTL"),
+):
+    """Generate or install the user LaunchAgent plist for `clawteam reap`."""
+    from clawteam.spawn.orphans import install_launchd_plist
+
+    try:
+        result = install_launchd_plist(
+            execute=execute,
+            clawteam_bin=clawteam_bin,
+            data_dir=data_dir,
+            interval_seconds=interval_seconds,
+            max_age_minutes=max_age_minutes,
+            registry_ttl_days=registry_ttl_days,
+        )
+    except ValueError as exc:
+        _output({"error": str(exc)}, lambda d: console.print(f"[red]{d['error']}[/red]"))
+        raise typer.Exit(1)
+
+    _output(
+        result,
+        lambda d: console.print(
+            f"[{'red' if d['status'] == 'error' else 'green'}]"
+            f"{'ERROR' if d['status'] == 'error' else 'OK'}[/] "
+            f"{d['status']} LaunchAgent plist at {d['path']}"
+        ),
+    )
+    if result["status"] == "error":
+        raise typer.Exit(1)
+
+
+@reaper_app.command("status-launchd")
+def reaper_status_launchd():
+    """Inspect the ClawTeam reaper LaunchAgent without mutating it."""
+    from clawteam.spawn.orphans import launchd_status
+
+    result = launchd_status()
+    _output(
+        result,
+        lambda d: console.print(
+            f"plist_exists={d['plist_exists']} launchctl_loaded={d['launchctl_loaded']}"
+        ),
+    )
+
+
+@reaper_app.command("bootstrap-launchd")
+def reaper_bootstrap_launchd(
+    execute: bool = typer.Option(False, "--execute", help="Run launchctl bootstrap. Default is dry-run."),
+):
+    """Bootstrap the installed ClawTeam reaper LaunchAgent."""
+    from clawteam.spawn.orphans import bootstrap_launchd_plist
+
+    result = bootstrap_launchd_plist(execute=execute)
+    _output(
+        result,
+        lambda d: console.print(
+            f"[{'red' if d['status'] == 'error' else 'green'}]"
+            f"{'ERROR' if d['status'] == 'error' else 'OK'}[/] "
+            f"{d['status']} {' '.join(d['command'])}"
+        ),
+    )
+    if result["status"] == "error":
+        raise typer.Exit(1)
+
+
+@reaper_app.command("bootout-launchd")
+def reaper_bootout_launchd(
+    execute: bool = typer.Option(False, "--execute", help="Run launchctl bootout. Default is dry-run."),
+):
+    """Unload the ClawTeam reaper LaunchAgent."""
+    from clawteam.spawn.orphans import bootout_launchd_plist
+
+    result = bootout_launchd_plist(execute=execute)
+    _output(
+        result,
+        lambda d: console.print(
+            f"[{'red' if d['status'] == 'error' else 'green'}]"
+            f"{'ERROR' if d['status'] == 'error' else 'OK'}[/] "
+            f"{d['status']} {' '.join(d['command'])}"
+        ),
+    )
+    if result["status"] == "error":
+        raise typer.Exit(1)
+
+
+@reaper_app.command("uninstall-launchd")
+def reaper_uninstall_launchd(
+    execute: bool = typer.Option(False, "--execute", help="Remove plist. Default is dry-run."),
+):
+    """Remove the ClawTeam reaper LaunchAgent plist."""
+    from clawteam.spawn.orphans import uninstall_launchd_plist
+
+    result = uninstall_launchd_plist(execute=execute)
+    _output(
+        result,
+        lambda d: console.print(
+            f"[{'red' if d['status'] == 'error' else 'green'}]"
+            f"{'ERROR' if d['status'] == 'error' else 'OK'}[/] {d['status']} {d['path']}"
+        ),
+    )
+    if result["status"] == "error":
+        raise typer.Exit(1)
 
 
 # ============================================================================

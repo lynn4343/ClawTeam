@@ -82,6 +82,20 @@ class SessionStore:
         except Exception:
             return None
 
+    def merge_state(self, agent_name: str, state: dict[str, Any]) -> SessionState:
+        """Merge lifecycle state into a saved session without clobbering resume fields."""
+        validate_identifier(agent_name, "agent name")
+        existing = self.load(agent_name)
+        merged = dict(existing.state) if existing else {}
+        merged.update(state)
+        # Decision: ND-363 (lifecycle persistence must preserve session_id/last_task_id across suspend writes)
+        return self.save(
+            agent_name=agent_name,
+            session_id=existing.session_id if existing else "",
+            last_task_id=existing.last_task_id if existing else "",
+            state=merged,
+        )
+
     def clear(self, agent_name: str) -> bool:
         validate_identifier(agent_name, "agent name")
         path = _sessions_root(self.team_name) / f"{agent_name}.json"
