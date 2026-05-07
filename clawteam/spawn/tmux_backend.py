@@ -152,6 +152,7 @@ class TmuxBackend(SpawnBackend):
             team_name=team_name,
             agent_name=agent_name,
             keepalive=keepalive,
+            foreground=True,
         )
         # Unset Claude nesting-detection env vars so spawned claude agents
         # don't refuse to start when the leader is itself a claude session.

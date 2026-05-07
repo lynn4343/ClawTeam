@@ -201,6 +201,8 @@ def test_tmux_backend_exports_spawn_path_for_agent_commands(monkeypatch, tmp_pat
 
     new_session = next(call for call in run_calls if call[:3] == ["tmux", "new-session", "-d"])
     full_cmd = new_session[-1]
+    assert '__ct_run_cmd() { sh -c "exec $1"; __ct_status=$?;' in full_cmd
+    assert "& __ct_child_pid=$!" not in full_cmd
     # Env vars are now written to a temp file and sourced, not inlined
     import re as _re
     env_file_match = _re.search(r"\.\s+(?:'([^']*/clawteam-env-[^']+\.env\.sh)'|([^\s;]*/clawteam-env-[^;\s]+\.env\.sh))", full_cmd)
