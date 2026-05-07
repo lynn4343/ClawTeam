@@ -58,6 +58,7 @@ def build_keepalive_shell_command(
     team_name: str,
     agent_name: str,
     keepalive: bool,
+    foreground: bool = False,
 ) -> str:
     """Build a POSIX shell command that keeps resumable agents alive."""
     cmd_str = " ".join(shlex.quote(c) for c in initial_command)
@@ -103,6 +104,17 @@ def build_keepalive_shell_command(
         "trap '__ct_forward_control_signal TSTP' TSTP; "
         "trap '__ct_forward_control_signal CONT' CONT;"
     )
+    if foreground:
+        signal_prelude = (
+            '__ct_run_cmd() { sh -c "exec $1"; __ct_status=$?; '
+            'return "$__ct_status"; }; '
+            '__ct_forward_signal() { __ct_signal="$1"; __ct_status="$2"; '
+            f"{killed_hook}; "
+            'exit "$__ct_status"; }; '
+            "trap '__ct_forward_signal TERM 143' TERM; "
+            "trap '__ct_forward_signal HUP 129' HUP; "
+            "trap '__ct_forward_signal INT 130' INT;"
+        )
 
     if not keepalive or not resume_command:
         return (
