@@ -18,6 +18,7 @@ class AgentProfile(BaseModel):
     agent: str = ""
     command: list[str] = Field(default_factory=list)
     model: str = ""
+    reasoning_level: str = ""
     base_url: str = ""
     base_url_env: str = ""
     api_key_env: str = ""

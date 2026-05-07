@@ -77,6 +77,45 @@ def test_apply_profile_maps_pi_model_without_provider_envs():
     assert env == {}
 
 
+def test_apply_profile_maps_codex_reasoning_level_to_config_override():
+    profile = AgentProfile(
+        agent="codex",
+        model="gpt-5.5",
+        reasoning_level="medium",
+    )
+
+    command, env, agent = apply_profile(profile)
+
+    assert agent == "codex"
+    assert command == [
+        "codex",
+        "--model",
+        "gpt-5.5",
+        "-c",
+        'model_reasoning_effort="medium"',
+    ]
+    assert env == {}
+
+
+def test_apply_profile_does_not_duplicate_codex_reasoning_override():
+    profile = AgentProfile(
+        agent="codex",
+        model="gpt-5.5",
+        reasoning_level="medium",
+        args=["-c", 'model_reasoning_effort="high"'],
+    )
+
+    command, _, _ = apply_profile(profile)
+
+    assert command == [
+        "codex",
+        "--model",
+        "gpt-5.5",
+        "-c",
+        'model_reasoning_effort="high"',
+    ]
+
+
 def test_apply_profile_respects_explicit_target_env_overrides(monkeypatch):
     monkeypatch.setenv("CUSTOM_PROVIDER_KEY", "provider-secret")
     profile = AgentProfile(
@@ -110,6 +149,8 @@ def test_profile_cli_set_list_show_remove(tmp_path):
             "kimi --config-file ~/.kimi/config.toml",
             "--model",
             "kimi-k2-thinking-turbo",
+            "--reasoning-level",
+            "medium",
             "--base-url",
             "https://api.moonshot.cn/v1",
             "--api-key-env",
@@ -130,6 +171,7 @@ def test_profile_cli_set_list_show_remove(tmp_path):
     result = runner.invoke(app, ["profile", "show", "moonshot-kimi"], env=env)
     assert result.exit_code == 0
     assert "kimi-k2-thinking-turbo" in result.output
+    assert "Reasoning level: medium" in result.output
     assert "https://api.moonshot.cn/v1" in result.output
 
     result = runner.invoke(app, ["profile", "remove", "moonshot-kimi"], env=env)
