@@ -1907,6 +1907,70 @@ def inbox_watch(
     watcher.watch()
 
 
+@inbox_app.command("poke")
+def inbox_poke(
+    team: str = typer.Argument(..., help="Team name"),
+    agent: str = typer.Argument(..., help="Agent name to wake"),
+    summary: str = typer.Option(
+        "Inbox poke: re-check your ClawTeam inbox.",
+        "--summary",
+        help="Runtime notification summary",
+    ),
+):
+    """Nudge a running agent to re-check its inbox."""
+    from clawteam.identity import AgentIdentity
+    from clawteam.team.mailbox import MailboxManager
+    from clawteam.team.manager import TeamManager
+    from clawteam.team.routing_policy import RuntimeEnvelope
+
+    identity = AgentIdentity.from_env()
+    inbox_name = TeamManager.resolve_inbox(team, agent, identity.user)
+    pending_count = MailboxManager(team).peek_count(inbox_name)
+    backend_name, backend = _resolve_runtime_backend(team, agent)
+    if not hasattr(backend, "inject_runtime_message"):
+        console.print(f"[red]Backend '{backend_name}' does not support runtime injection.[/red]")
+        raise typer.Exit(1)
+
+    envelope = RuntimeEnvelope(
+        source=identity.agent_name or "system",
+        target=agent,
+        channel="direct",
+        priority="high",
+        message_type="inbox_poke",
+        summary=summary,
+        evidence=[
+            f"team: {team}",
+            f"inbox: {inbox_name}",
+            f"pendingInboxCount: {pending_count}",
+        ],
+        recommended_next_action=(
+            f"Run `clawteam inbox receive {team} --agent {inbox_name}` and continue the pending work."
+        ),
+        payload={
+            "team": team,
+            "agent": agent,
+            "inbox": inbox_name,
+            "pendingInboxCount": pending_count,
+        },
+    )
+    ok, status = backend.inject_runtime_message(team, agent, envelope)
+    if not ok:
+        console.print(f"[red]{status}[/red]")
+        raise typer.Exit(1)
+
+    _output(
+        {
+            "team": team,
+            "agent": agent,
+            "inbox": inbox_name,
+            "backend": backend_name,
+            "pendingInboxCount": pending_count,
+            "status": status,
+        },
+        lambda data: console.print(f"[green]OK[/green] {data['status']}"),
+    )
+
+
 # ============================================================================
 # Runtime Commands
 # ============================================================================
@@ -4319,6 +4383,67 @@ def template_show(
 # Launch Command
 # ============================================================================
 
+
+def _spawn_result_indicates_error(result: str) -> bool:
+    return result.strip().lower().startswith("error:")
+
+
+def _verify_template_launch(
+    team_name: str,
+    expected_agent_names: list[str],
+    spawn_results: list[dict[str, str]],
+) -> dict[str, object] | None:
+    from clawteam.spawn.registry import get_registry
+
+    expected = set(expected_agent_names)
+    registry = get_registry(team_name)
+    spawned = expected.intersection(registry.keys())
+    missing = sorted(expected - spawned)
+    spawn_errors = [
+        {"agent": item["name"], "result": item["result"]}
+        for item in spawn_results
+        if _spawn_result_indicates_error(item.get("result", ""))
+    ]
+
+    if not missing and not spawn_errors:
+        return None
+
+    if missing:
+        error = (
+            f"Partial spawn: {len(spawned)}/{len(expected_agent_names)} agents spawned. "
+            f"Missing: {', '.join(missing)}. "
+            "Likely cause: Codex slot contention or backend launch failure. "
+            "Try the Claude variant template, clear other Codex sessions "
+            "(lynn_yolo, prior tmux teams), or verify the CLI works standalone."
+        )
+    else:
+        failed_agents = ", ".join(item["agent"] for item in spawn_errors)
+        error = f"Spawn verification failed: backend reported errors for {failed_agents}."
+
+    return {
+        "status": "failed",
+        "error": error,
+        "team": team_name,
+        "expected": len(expected_agent_names),
+        "actual": len(spawned),
+        "missingAgents": missing,
+        "spawnErrors": spawn_errors,
+    }
+
+
+def _print_launch_verification_failure(data: dict[str, object]) -> None:
+    console.print(f"[red]{data['error']}[/red]")
+    spawn_errors = data.get("spawnErrors") or []
+    if spawn_errors:
+        table = Table(title="Spawn Errors")
+        table.add_column("Agent", style="cyan")
+        table.add_column("Result")
+        for item in spawn_errors:
+            if isinstance(item, dict):
+                table.add_row(str(item.get("agent", "")), str(item.get("result", "")))
+        console.print(table)
+
+
 @app.command("launch")
 def launch_team(
     template: str = typer.Argument(..., help="Template name (e.g., hedge-fund)"),
@@ -4474,7 +4599,16 @@ def launch_team(
             is_leader=(agent.name == tmpl.leader.name),
             keepalive=True,
         )
-        spawned.append({"name": agent.name, "id": a_id, "type": agent.type, "result": result})
+        spawned.append({"name": agent.name, "id": a_id, "type": agent.type, "result": str(result)})
+
+    verification_failure = _verify_template_launch(
+        t_name,
+        [agent.name for agent in all_agents],
+        spawned,
+    )
+    if verification_failure:
+        _output(verification_failure, _print_launch_verification_failure)
+        raise typer.Exit(1)
 
     # 9. Output summary
     out = {
