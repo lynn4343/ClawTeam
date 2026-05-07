@@ -23,6 +23,42 @@ class RecordingBackend:
 
     def spawn(self, **kwargs):
         self.calls.append(kwargs)
+        from clawteam.spawn.registry import register_agent
+
+        register_agent(
+            team_name=kwargs["team_name"],
+            agent_name=kwargs["agent_name"],
+            backend="tmux",
+            tmux_target=f"clawteam-{kwargs['team_name']}:{kwargs['agent_name']}",
+            pid=1234,
+            command=list(kwargs["command"]),
+        )
+        return f"Agent '{kwargs['agent_name']}' spawned"
+
+    def list_running(self):
+        return []
+
+
+class PartialLaunchBackend:
+    def __init__(self, failing_agents: set[str]):
+        self.failing_agents = failing_agents
+        self.calls = []
+
+    def spawn(self, **kwargs):
+        self.calls.append(kwargs)
+        if kwargs["agent_name"] in self.failing_agents:
+            return f"Error: Codex slot unavailable for {kwargs['agent_name']}"
+
+        from clawteam.spawn.registry import register_agent
+
+        register_agent(
+            team_name=kwargs["team_name"],
+            agent_name=kwargs["agent_name"],
+            backend="tmux",
+            tmux_target=f"clawteam-{kwargs['team_name']}:{kwargs['agent_name']}",
+            pid=1234,
+            command=list(kwargs["command"]),
+        )
         return f"Agent '{kwargs['agent_name']}' spawned"
 
     def list_running(self):
@@ -66,6 +102,26 @@ def test_launch_cli_passes_skip_permissions_from_config(monkeypatch, tmp_path):
     assert result.exit_code == 0
     assert backend.calls
     assert all(call["skip_permissions"] is True for call in backend.calls)
+
+
+def test_launch_cli_fails_when_template_spawn_is_partial(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAWTEAM_DATA_DIR", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    backend = PartialLaunchBackend({"portfolio-manager", "risk-manager"})
+    monkeypatch.setattr("clawteam.spawn.get_backend", lambda _: backend)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["launch", "hedge-fund", "--team", "fund1", "--goal", "Analyze AAPL"],
+        env={"CLAWTEAM_DATA_DIR": str(tmp_path)},
+    )
+
+    assert result.exit_code == 1
+    assert "Partial spawn: 5/7 agents spawned" in result.output
+    assert "portfolio-manager" in result.output
+    assert "risk-manager" in result.output
+    assert "Codex slot contention" in result.output
 
 
 def test_spawn_cli_rejects_removed_acpx_backend(monkeypatch, tmp_path):

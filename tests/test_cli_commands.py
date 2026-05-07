@@ -406,6 +406,55 @@ def test_runtime_inject_cli_uses_registered_backend(monkeypatch, tmp_path):
     assert captured["envelope"].summary == "Queued update"
 
 
+def test_inbox_poke_cli_injects_runtime_wakeup(monkeypatch, tmp_path):
+    runner = CliRunner()
+    env = {
+        "HOME": str(tmp_path),
+        "CLAWTEAM_DATA_DIR": str(tmp_path / ".clawteam"),
+        "CLAWTEAM_AGENT_NAME": "leader",
+    }
+    TeamManager.create_team(
+        name="demo",
+        leader_name="leader",
+        leader_id="leader001",
+    )
+    TeamManager.add_member(
+        team_name="demo",
+        member_name="worker",
+        agent_id="worker001",
+    )
+    MailboxManager("demo").send(
+        from_agent="leader",
+        to="worker",
+        content="Plan approved.",
+    )
+    captured = {}
+
+    class StubBackend:
+        def inject_runtime_message(self, team, agent_name, envelope):
+            captured["team"] = team
+            captured["agent"] = agent_name
+            captured["envelope"] = envelope
+            return True, "Injected runtime notification into clawteam-demo:worker"
+
+    monkeypatch.setattr(
+        "clawteam.cli.commands._resolve_runtime_backend",
+        lambda team, agent: ("tmux", StubBackend()),
+    )
+
+    result = runner.invoke(app, ["inbox", "poke", "demo", "worker"], env=env)
+
+    assert result.exit_code == 0
+    assert captured["team"] == "demo"
+    assert captured["agent"] == "worker"
+    assert captured["envelope"].message_type == "inbox_poke"
+    assert captured["envelope"].summary == "Inbox poke: re-check your ClawTeam inbox."
+    assert "pendingInboxCount: 1" in captured["envelope"].evidence
+    assert "clawteam inbox receive demo --agent worker" in captured[
+        "envelope"
+    ].recommended_next_action
+
+
 def test_runtime_state_cli_reports_pending_routes(tmp_path):
     runner = CliRunner()
     env = {
