@@ -631,6 +631,8 @@ def profile_show(
         console.print(f"  Agent: {d.get('agent') or '(unset)'}")
         console.print(f"  Command: {' '.join(d.get('command', [])) or '(unset)'}")
         console.print(f"  Model: {d.get('model') or '(default)'}")
+        if d.get("reasoning_level"):
+            console.print(f"  Reasoning level: {d['reasoning_level']}")
         console.print(f"  Base URL: {d.get('base_url') or '(default)'}")
         if d.get("base_url_env"):
             console.print(f"  Base URL target env: {d['base_url_env']}")
@@ -659,6 +661,7 @@ def profile_set(
     description: Optional[str] = typer.Option(None, "--description", help="Profile description"),
     command: Optional[str] = typer.Option(None, "--command", help="Exact command string (e.g. 'kimi --config-file ~/.kimi/config.toml')"),
     model: Optional[str] = typer.Option(None, "--model", help="Default model"),
+    reasoning_level: Optional[str] = typer.Option(None, "--reasoning-level", help="Default reasoning level metadata"),
     base_url: Optional[str] = typer.Option(None, "--base-url", help="Provider base URL"),
     base_url_env: Optional[str] = typer.Option(None, "--base-url-env", help="Destination env var for base URL injection"),
     api_key_env: Optional[str] = typer.Option(None, "--api-key-env", help="Source env var holding the API key"),
@@ -682,6 +685,8 @@ def profile_set(
         profile.command = shlex.split(command)
     if model is not None:
         profile.model = model
+    if reasoning_level is not None:
+        profile.reasoning_level = reasoning_level
     if base_url is not None:
         profile.base_url = base_url
     if base_url_env is not None:

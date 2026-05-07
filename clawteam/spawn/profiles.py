@@ -136,6 +136,15 @@ def apply_profile(
         if model_flag:
             resolved_command.extend([model_flag, profile.model])
 
+    if profile.reasoning_level:
+        reasoning_args = _reasoning_level_args(
+            agent,
+            profile.reasoning_level,
+            command=resolved_command + list(profile.args),
+        )
+        if reasoning_args:
+            resolved_command.extend(reasoning_args)
+
     if profile.args:
         resolved_command.extend(profile.args)
 
@@ -151,6 +160,24 @@ def command_basename(command: list[str]) -> str:
 
 def _command_has_model_arg(command: list[str]) -> bool:
     return "--model" in command or "-m" in command
+
+
+def _reasoning_level_args(agent: str, reasoning_level: str, *, command: list[str]) -> list[str]:
+    if agent not in {"codex", "codex-cli"}:
+        return []
+    if _command_has_config_key(command, "model_reasoning_effort"):
+        return []
+    return ["-c", f'model_reasoning_effort="{reasoning_level}"']
+
+
+def _command_has_config_key(command: list[str], key: str) -> bool:
+    for index, item in enumerate(command):
+        if item in {"-c", "--config"}:
+            if index + 1 < len(command) and command[index + 1].split("=", 1)[0].strip() == key:
+                return True
+        if item.startswith("--config=") and item[len("--config="):].split("=", 1)[0].strip() == key:
+            return True
+    return False
 
 
 def _model_flag(agent: str) -> str | None:
