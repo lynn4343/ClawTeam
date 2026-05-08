@@ -584,6 +584,43 @@ def test_spawn_cli_enables_keepalive_by_default(monkeypatch, tmp_path):
     assert backend.calls[0]["keepalive"] is True
 
 
+def test_spawn_cli_uses_one_shot_prompt_when_no_keepalive(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAWTEAM_DATA_DIR", str(tmp_path))
+    TeamManager.create_team(
+        name="demo",
+        leader_name="leader",
+        leader_id="leader001",
+    )
+    backend = RecordingBackend()
+    monkeypatch.setattr("clawteam.spawn.get_backend", lambda _: backend)
+    monkeypatch.setattr("clawteam.spawn.registry.is_agent_alive", lambda team, agent: None)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "spawn",
+            "tmux",
+            "codex",
+            "--team",
+            "demo",
+            "--agent-name",
+            "alice",
+            "--no-workspace",
+            "--no-keepalive",
+            "--task",
+            "Ship one task",
+        ],
+        env={"CLAWTEAM_DATA_DIR": str(tmp_path)},
+    )
+
+    assert result.exit_code == 0
+    assert backend.calls[0]["keepalive"] is False
+    prompt = backend.calls[0]["prompt"]
+    assert "One-Shot Completion Protocol" in prompt
+    assert "Worker Loop Protocol" not in prompt
+
+
 def test_spawn_cli_marks_only_actual_team_leader_as_leader(monkeypatch, tmp_path):
     monkeypatch.setenv("CLAWTEAM_DATA_DIR", str(tmp_path))
     TeamManager.create_team(

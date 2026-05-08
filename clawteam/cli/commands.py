@@ -3708,6 +3708,7 @@ def spawn_agent(
             workspace_branch=ws_branch,
             isolated_workspace=bool(workspace and cwd),
             repo_path=repo,
+            keepalive=keepalive,
         )
 
     # Session resume: inject --resume flag for claude commands

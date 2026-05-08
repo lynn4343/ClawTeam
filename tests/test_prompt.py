@@ -104,3 +104,18 @@ class TestBuildAgentPrompt:
         assert "scan `clawteam task list my-team`" in prompt
         assert "clawteam inbox receive my-team --agent dev" in prompt
         assert "clawteam lifecycle idle my-team" in prompt
+
+    def test_prompt_includes_one_shot_exit_protocol_when_keepalive_false(self):
+        prompt = build_agent_prompt(
+            agent_name="dev", agent_id="id", agent_type="t",
+            team_name="my-team", leader_name="boss", task="task",
+            keepalive=False,
+        )
+        assert "One-Shot Completion Protocol" in prompt
+        assert "--no-keepalive" in prompt
+        assert "exit the process" in prompt
+        assert "Do not enter an inbox/task polling loop" in prompt
+        assert "Do not call `clawteam lifecycle idle my-team`" in prompt
+        assert "releases the seat" in prompt
+        assert "Worker Loop Protocol" not in prompt
+        assert "Do not exit after the first task" not in prompt
