@@ -36,6 +36,7 @@ def build_agent_prompt(
     workspace_branch: str = "",
     isolated_workspace: bool = False,
     repo_path: str | None = None,
+    keepalive: bool = True,
 ) -> str:
     """Build agent prompt: identity + task + context + coordination."""
     lines = [
@@ -83,7 +84,6 @@ def build_agent_prompt(
         "",
         "## Coordination Protocol\n",
         f"- Use `clawteam task list {team_name} --owner {agent_name}` to see your tasks.",
-        f"- If that list is empty, check `clawteam task list {team_name}` and your inbox before declaring yourself idle.",
         f"- Starting a task: `clawteam task update {team_name} <task-id> --status in_progress`",
         "- Before marking a task completed, commit your changes in this repository with git.",
         '- Use a clear commit message, e.g. `git add -A && git commit -m "Implement <task summary>"`.',
@@ -93,16 +93,32 @@ def build_agent_prompt(
         "- If you are blocked or need help, message the leader:",
         f'  `clawteam inbox send {team_name} {leader_name} "Need help: <description>"`',
         f"- After finishing work, report your costs: `clawteam cost report {team_name} --input-tokens <N> --output-tokens <N> --cost-cents <N>`",
-        "- Do not exit after the first task unless the leader explicitly tells you to stop.",
-        "",
-        "## Worker Loop Protocol\n",
-        "- For ongoing jobs, do not start a detached daemon/watch loop and then immediately exit.",
-        "- Keep the monitoring/reporting loop in the foreground, or keep a foreground watchdog alive that continues checking health and sending updates.",
-        f"- After finishing your current task batch, re-check `clawteam task list {team_name} --owner {agent_name}`.",
-        f"- If that still shows no tasks, scan `clawteam task list {team_name}` for pending work that matches your assignment before you go idle.",
-        f"- Then check for new instructions with `clawteam inbox receive {team_name} --agent {agent_name}`.",
-        f"- If you become idle, notify the leader with `clawteam lifecycle idle {team_name}` and continue checking for new work.",
-        "- Repeat this loop until the leader confirms shutdown or there is truly no more work to do.",
-        "",
     ])
+    if keepalive:
+        lines.extend([
+            f"- If that list is empty, check `clawteam task list {team_name}` and your inbox before declaring yourself idle.",
+            "- Do not exit after the first task unless the leader explicitly tells you to stop.",
+            "",
+            "## Worker Loop Protocol\n",
+            "- For ongoing jobs, do not start a detached daemon/watch loop and then immediately exit.",
+            "- Keep the monitoring/reporting loop in the foreground, or keep a foreground watchdog alive that continues checking health and sending updates.",
+            f"- After finishing your current task batch, re-check `clawteam task list {team_name} --owner {agent_name}`.",
+            f"- If that still shows no tasks, scan `clawteam task list {team_name}` for pending work that matches your assignment before you go idle.",
+            f"- Then check for new instructions with `clawteam inbox receive {team_name} --agent {agent_name}`.",
+            f"- If you become idle, notify the leader with `clawteam lifecycle idle {team_name}` and continue checking for new work.",
+            "- Repeat this loop until the leader confirms shutdown or there is truly no more work to do.",
+            "",
+        ])
+    else:
+        lines.extend([
+            "",
+            "## One-Shot Completion Protocol",
+            "- If that list is empty, use this prompt's task brief as the one-shot assignment; do not enter idle polling just because ClawTeam task store has no rows.",
+            "- This spawn was launched with `--no-keepalive`; complete the assigned task batch once, write any required completion artifact, send the final summary, and then exit the process.",
+            "- Do not enter an inbox/task polling loop after terminal completion.",
+            f"- Do not call `clawteam lifecycle idle {team_name}` as a substitute for process exit on this one-shot dispatch.",
+            "- If you are blocked, write the required blocked/needs_followup completion artifact if the task defines one, message the leader, and then exit.",
+            "- The ClawTeam wrapper records lifecycle on process exit and releases the seat.",
+            "",
+        ])
     return "\n".join(lines)
