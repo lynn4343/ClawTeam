@@ -3309,6 +3309,91 @@ def orphan_clear(
     )
 
 
+@app.command("stale-live-list")
+def stale_live_list(
+    team: Optional[str] = typer.Option(None, "--team", "-t", help="Team name (default: all teams)"),
+    max_age_hours: float = typer.Option(2.0, "--max-hours", help="Running/unreleased live age threshold"),
+):
+    """List stale live or legacy unreleased lifecycle seats.
+
+    Unlike `orphan-list`, this is a dry-run detector only. A stale-live row may
+    still be doing valid long-running work, and legacy rows need PID verification
+    before seat release.
+    """
+    from clawteam.spawn.orphans import list_stale_live_teams
+
+    candidates = list_stale_live_teams(team, max_age_hours=max_age_hours)
+
+    def _alive_label(value):
+        if value is True:
+            return "true"
+        if value is False:
+            return "false"
+        return "unknown"
+
+    def _agent_identity(agent):
+        identity = agent.get("registry_identity") or {}
+        backend = identity.get("backend") or "-"
+        pid = identity.get("pid") or "-"
+        tmux_target = identity.get("tmux_target") or identity.get("tmux_pane_id") or ""
+        if tmux_target:
+            return f"{backend}:pid={pid} tmux={tmux_target}"
+        return f"{backend}:pid={pid}"
+
+    def _human(items):
+        if not items:
+            console.print("[green]OK[/green] No stale live teams detected")
+            return
+        table = Table(title="Stale Live / Legacy Seat Candidates")
+        table.add_column("Team", style="cyan")
+        table.add_column("Agent")
+        table.add_column("Alive")
+        table.add_column("Identity")
+        table.add_column("Age h", justify="right")
+        table.add_column("Tasks")
+        table.add_column("Terminal?")
+        table.add_column("Reason")
+        for item in items:
+            tasks = item["task_summary"]
+            task_text = (
+                f"total={tasks['total']} "
+                f"open={tasks['non_terminal']} "
+                f"done={tasks['completed']}"
+            )
+            terminality = item.get("task_terminality")
+            if not terminality:
+                terminality = "yes" if item["all_tasks_terminal"] else "no"
+            for agent in item["agents"]:
+                age = agent.get("age_hours")
+                table.add_row(
+                    item["team"],
+                    agent["agent"],
+                    _alive_label(agent.get("alive")),
+                    _agent_identity(agent),
+                    str(age) if age is not None else "unknown",
+                    task_text,
+                    terminality,
+                    agent.get("reason") or item.get("reason") or "-",
+                )
+        console.print(table)
+        console.print("Candidate details:")
+        for item in items:
+            for agent in item["agents"]:
+                console.print(
+                    f"- {item['team']}/{agent['agent']} "
+                    f"alive={_alive_label(agent.get('alive'))} "
+                    f"identity={_agent_identity(agent)} "
+                    f"reason={agent.get('reason') or item.get('reason') or '-'}"
+                )
+        console.print(
+            "[dim]Review candidates before cleanup. Use lifecycle shutdown for live work; "
+            "use parent-killed only after confirming the row is terminal or legacy-dead. "
+            "Run with --json for full identity snapshots.[/dim]"
+        )
+
+    _output(candidates, _human)
+
+
 @app.command("reap")
 def reap(
     team: Optional[str] = typer.Option(None, "--team", "-t", help="Team name (default: all teams)"),
