@@ -159,10 +159,36 @@ def test_stale_live_team_detector_flags_legacy_dead_unreleased_row(team_name, is
     assert len(candidates) == 1
     assert candidates[0]["reason"] == "legacy-unreleased-no-lifecycle-dead-process"
     assert candidates[0]["oldest_age_hours"] is None
+    assert candidates[0]["task_terminality"] == "unknown"
     assert candidates[0]["agents"][0]["agent"] == agent
     assert candidates[0]["agents"][0]["alive"] is False
     assert candidates[0]["agents"][0]["age_hours"] is None
     assert orphans == []
+
+
+def test_stale_live_team_detector_flags_legacy_live_unreleased_row(team_name, isolated_data_dir):
+    agent = "legacy-live-agent"
+    register_agent(team_name, agent, backend="subprocess", pid=os.getpid())
+    _strip_registry_lifecycle_fields(team_name, agent, isolated_data_dir)
+
+    candidates = list_stale_live_teams(team_name, max_age_hours=0.5, now=NOW)
+
+    assert len(candidates) == 1
+    assert candidates[0]["reason"] == "legacy-unreleased-no-lifecycle-live-process"
+    assert candidates[0]["active_seats"] == 1
+    assert candidates[0]["agents"][0]["alive"] is True
+
+
+def test_stale_live_team_detector_flags_legacy_unverifiable_row(team_name, isolated_data_dir):
+    agent = "legacy-unknown-agent"
+    register_agent(team_name, agent, backend="mystery", pid=0)
+    _strip_registry_lifecycle_fields(team_name, agent, isolated_data_dir)
+
+    candidates = list_stale_live_teams(team_name, max_age_hours=0.5, now=NOW)
+
+    assert len(candidates) == 1
+    assert candidates[0]["reason"] == "legacy-unreleased-no-lifecycle-unverifiable"
+    assert candidates[0]["agents"][0]["alive"] is None
 
 
 def test_orphan_reaper_skips_session_only_empirical_shape_without_identity(team_name):
@@ -343,6 +369,27 @@ def test_stale_live_list_cli_reports_live_candidates(team_name, isolated_data_di
     assert data[0]["team"] == team_name
     assert data[0]["candidate_count"] == 1
     assert data[0]["reason"] == "stale-live-running-unreleased"
+
+
+def test_stale_live_list_cli_human_output_shows_agent_identity(team_name, isolated_data_dir):
+    agent = "live-agent"
+    register_agent(team_name, agent, backend="subprocess", pid=os.getpid())
+    _age_registry(team_name, agent, isolated_data_dir)
+    _seed_running_session(team_name, agent)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["stale-live-list", "--team", team_name, "--max-hours", "0.5"],
+    )
+
+    assert result.exit_code == 0
+    assert "Stale Live / Legacy Seat Candidates" in result.output
+    assert agent in result.output
+    assert "subprocess:pid=" in result.output
+    assert "stale-live-running-unreleased" in result.output
+    assert "Run with" in result.output
+    assert "--json" in result.output
 
 
 def test_launchd_plist_uses_absolute_executable_and_fifteen_minute_interval(tmp_path):

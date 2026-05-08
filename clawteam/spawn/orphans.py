@@ -15,6 +15,7 @@ from clawteam.fileutil import file_locked
 from clawteam.paths import validate_identifier
 from clawteam.spawn.cli_env import resolve_clawteam_executable
 from clawteam.spawn.registry import (
+    TERMINAL_WORKER_STATES,
     WORKER_STATE_KILLED,
     WORKER_STATE_KILLED_BY_REAPER,
     WORKER_STATE_RUNNING,
@@ -153,12 +154,13 @@ def list_stale_live_teams(
             "team": team,
             "max_age_hours": max_age_hours,
             "candidate_count": len(agents),
-            "active_seats": len(agents),
+            "active_seats": _registry_active_seat_count(registry),
             "oldest_age_hours": max(known_ages) if known_ages else None,
             "task_summary": task_summary,
             "all_tasks_terminal": (
                 task_summary["total"] > 0 and task_summary["non_terminal"] == 0
             ),
+            "task_terminality": _task_terminality(task_summary),
             "agents": agents,
             "reasons": reasons,
             "reason": reasons[0] if len(reasons) == 1 else "lifecycle-seat-anomalies",
@@ -574,6 +576,15 @@ def _legacy_unreleased_candidate(
     }
 
 
+def _registry_active_seat_count(registry: dict[str, dict]) -> int:
+    count = 0
+    for info in registry.values():
+        state = str(info.get("worker_state") or WORKER_STATE_RUNNING)
+        if state not in TERMINAL_WORKER_STATES and not bool(info.get("seat_released", False)):
+            count += 1
+    return count
+
+
 def _tmux_default_target_alive(team_name: str, agent_name: str) -> bool:
     if not shutil.which("tmux"):
         return False
@@ -631,6 +642,14 @@ def _task_summary(team_name: str) -> dict[str, int]:
     }
     counts["non_terminal"] = counts["pending"] + counts["in_progress"] + counts["blocked"]
     return counts
+
+
+def _task_terminality(task_summary: dict[str, int]) -> str:
+    if task_summary["total"] == 0:
+        return "unknown"
+    if task_summary["non_terminal"] == 0:
+        return "terminal"
+    return "open"
 
 
 def _launchd_plist_path() -> Path:
