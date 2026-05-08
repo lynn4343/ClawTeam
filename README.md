@@ -686,6 +686,7 @@ clawteam plan reject <team> <plan-id> <agent> --feedback "Revise X"
 clawteam lifecycle request-shutdown <team> <agent> --reason "done"
 clawteam lifecycle approve-shutdown <team> <request-id> <agent>
 clawteam lifecycle idle <team>
+clawteam stale-live-list --team <team>            # dry-run: old live/legacy unreleased seats
 clawteam orphan-list --team <team>                 # stale running sessions with no live worker
 clawteam orphan-clear --team <team> --dry-run      # preview cleanup
 clawteam orphan-clear --team <team> --execute      # mark stale orphans killed-by-reaper

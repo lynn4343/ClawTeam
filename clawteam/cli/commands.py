@@ -3309,6 +3309,56 @@ def orphan_clear(
     )
 
 
+@app.command("stale-live-list")
+def stale_live_list(
+    team: Optional[str] = typer.Option(None, "--team", "-t", help="Team name (default: all teams)"),
+    max_age_hours: float = typer.Option(2.0, "--max-hours", help="Running/unreleased live age threshold"),
+):
+    """List stale live or legacy unreleased lifecycle seats.
+
+    Unlike `orphan-list`, this is a dry-run detector only. A stale-live row may
+    still be doing valid long-running work, and legacy rows need PID verification
+    before seat release.
+    """
+    from clawteam.spawn.orphans import list_stale_live_teams
+
+    candidates = list_stale_live_teams(team, max_age_hours=max_age_hours)
+
+    def _human(items):
+        if not items:
+            console.print("[green]OK[/green] No stale live teams detected")
+            return
+        table = Table(title="Stale Live Teams")
+        table.add_column("Team", style="cyan")
+        table.add_column("Agents", justify="right")
+        table.add_column("Oldest h", justify="right")
+        table.add_column("Tasks")
+        table.add_column("Terminal?")
+        table.add_column("Reason")
+        for item in items:
+            tasks = item["task_summary"]
+            task_text = (
+                f"total={tasks['total']} "
+                f"open={tasks['non_terminal']} "
+                f"done={tasks['completed']}"
+            )
+            table.add_row(
+                item["team"],
+                str(item["candidate_count"]),
+                str(item["oldest_age_hours"]) if item["oldest_age_hours"] is not None else "unknown",
+                task_text,
+                "yes" if item["all_tasks_terminal"] else "no",
+                item.get("reason") or "-",
+            )
+        console.print(table)
+        console.print(
+            "[dim]Review candidates before cleanup. Use lifecycle shutdown for live work; "
+            "use parent-killed only after confirming the row is terminal or legacy-dead.[/dim]"
+        )
+
+    _output(candidates, _human)
+
+
 @app.command("reap")
 def reap(
     team: Optional[str] = typer.Option(None, "--team", "-t", help="Team name (default: all teams)"),

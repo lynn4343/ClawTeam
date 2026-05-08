@@ -84,6 +84,88 @@ def list_orphan_workers(
     return orphans
 
 
+def list_stale_live_teams(
+    team_name: str | None = None,
+    *,
+    max_age_hours: float = 2.0,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Return live teams with old running/unreleased workers.
+
+    This detector is intentionally separate from orphan detection: orphan workers
+    have an old lifecycle timestamp and no live backing process, while stale-live
+    workers still have a process or tmux pane. It also surfaces legacy unreleased
+    rows with no lifecycle timestamp because they can leak capacity seats without
+    meeting the orphan reaper's age guard.
+    """
+    now = now or datetime.now(timezone.utc)
+    candidates: list[dict[str, Any]] = []
+    for team in _iter_team_names(team_name):
+        registry = get_registry(team)
+        session_map = {session.agent_name: session for session in SessionStore(team).list_sessions()}
+        agents: list[dict[str, Any]] = []
+        for agent_name in sorted(set(registry) | set(session_map)):
+            info = registry.get(agent_name)
+            session = session_map.get(agent_name)
+            if not _joined_running_unreleased(info, session):
+                continue
+
+            last_lifecycle_at = _latest_lifecycle_at(info, session)
+            alive = _joined_alive(team, agent_name, info)
+            if last_lifecycle_at is None:
+                candidate = _legacy_unreleased_candidate(agent_name, info, session, alive)
+                if candidate is not None:
+                    agents.append(candidate)
+                continue
+            age_hours = (now - last_lifecycle_at).total_seconds() / 3600.0
+            if age_hours < max_age_hours:
+                continue
+
+            if alive is not True:
+                continue
+
+            agents.append({
+                "agent": agent_name,
+                "age_hours": round(age_hours, 2),
+                "last_lifecycle_at": last_lifecycle_at.isoformat(),
+                "registry_present": info is not None,
+                "session_present": session is not None,
+                "registry_state": str((info or {}).get("worker_state", "")),
+                "session_state": str((session.state if session else {}).get("state", "")),
+                "registry_seat_released": bool((info or {}).get("seat_released", False)),
+                "session_seat_released": bool((session.state if session else {}).get("seat_released", False)),
+                "registry_identity": _registry_identity(info) if info is not None else None,
+                "session_identity": _session_identity(session) if session is not None else None,
+                "alive": alive,
+                "reason": "stale-live-running-unreleased",
+            })
+        if not agents:
+            continue
+
+        task_summary = _task_summary(team)
+        reasons = sorted({str(agent["reason"]) for agent in agents})
+        known_ages = [
+            agent["age_hours"]
+            for agent in agents
+            if isinstance(agent.get("age_hours"), (float, int))
+        ]
+        candidates.append({
+            "team": team,
+            "max_age_hours": max_age_hours,
+            "candidate_count": len(agents),
+            "active_seats": len(agents),
+            "oldest_age_hours": max(known_ages) if known_ages else None,
+            "task_summary": task_summary,
+            "all_tasks_terminal": (
+                task_summary["total"] > 0 and task_summary["non_terminal"] == 0
+            ),
+            "agents": agents,
+            "reasons": reasons,
+            "reason": reasons[0] if len(reasons) == 1 else "lifecycle-seat-anomalies",
+        })
+    return candidates
+
+
 def reap_orphan_workers(
     team_name: str | None = None,
     *,
@@ -460,6 +542,38 @@ def _joined_alive(team_name: str, agent_name: str, info: dict | None) -> bool | 
     return None
 
 
+def _legacy_unreleased_candidate(
+    agent_name: str,
+    info: dict | None,
+    session,
+    alive: bool | None,
+) -> dict[str, Any] | None:
+    """Build a read-only candidate for unreleased legacy rows with no age signal."""
+    if info is None and alive is None:
+        return None
+    if alive is True:
+        reason = "legacy-unreleased-no-lifecycle-live-process"
+    elif alive is False:
+        reason = "legacy-unreleased-no-lifecycle-dead-process"
+    else:
+        reason = "legacy-unreleased-no-lifecycle-unverifiable"
+    return {
+        "agent": agent_name,
+        "age_hours": None,
+        "last_lifecycle_at": None,
+        "registry_present": info is not None,
+        "session_present": session is not None,
+        "registry_state": str((info or {}).get("worker_state", "")),
+        "session_state": str((session.state if session else {}).get("state", "")),
+        "registry_seat_released": bool((info or {}).get("seat_released", False)),
+        "session_seat_released": bool((session.state if session else {}).get("seat_released", False)),
+        "registry_identity": _registry_identity(info) if info is not None else None,
+        "session_identity": _session_identity(session) if session is not None else None,
+        "alive": alive,
+        "reason": reason,
+    }
+
+
 def _tmux_default_target_alive(team_name: str, agent_name: str) -> bool:
     if not shutil.which("tmux"):
         return False
@@ -492,6 +606,31 @@ def _parse_unix_time(value: Any) -> datetime | None:
         return datetime.fromtimestamp(float(value), timezone.utc)
     except (TypeError, ValueError, OSError):
         return None
+
+
+def _task_summary(team_name: str) -> dict[str, int]:
+    try:
+        from clawteam.team.models import TaskStatus
+        from clawteam.team.tasks import TaskStore
+        tasks = TaskStore(team_name).list_tasks()
+    except Exception:
+        return {
+            "total": 0,
+            "pending": 0,
+            "in_progress": 0,
+            "blocked": 0,
+            "completed": 0,
+            "non_terminal": 0,
+        }
+    counts = {
+        "total": len(tasks),
+        "pending": sum(1 for task in tasks if task.status == TaskStatus.pending),
+        "in_progress": sum(1 for task in tasks if task.status == TaskStatus.in_progress),
+        "blocked": sum(1 for task in tasks if task.status == TaskStatus.blocked),
+        "completed": sum(1 for task in tasks if task.status == TaskStatus.completed),
+    }
+    counts["non_terminal"] = counts["pending"] + counts["in_progress"] + counts["blocked"]
+    return counts
 
 
 def _launchd_plist_path() -> Path:

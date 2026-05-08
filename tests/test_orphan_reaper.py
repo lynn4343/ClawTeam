@@ -16,6 +16,7 @@ from clawteam.spawn.keepalive import build_keepalive_shell_command
 from clawteam.spawn.orphans import (
     build_launchd_plist,
     list_orphan_workers,
+    list_stale_live_teams,
     reap_orphan_workers,
     run_reaper,
 )
@@ -72,6 +73,23 @@ def _age_registry(
     _save(path, registry)
 
 
+def _strip_registry_lifecycle_fields(team: str, agent: str, isolated_data_dir) -> None:
+    path = isolated_data_dir / "teams" / team / "spawn_registry.json"
+    registry = _load(path)
+    for key in (
+        "spawned_at",
+        "worker_state",
+        "seat_released",
+        "lifecycle_generation",
+        "last_lifecycle_event",
+        "last_lifecycle_error",
+        "last_lifecycle_at",
+    ):
+        registry[agent].pop(key, None)
+    _save(path, registry)
+    SessionStore(team).clear(agent)
+
+
 def test_orphan_reaper_terminalizes_registry_and_session(team_name, isolated_data_dir):
     agent = "abstract-239b5169ba51"
     register_agent(team_name, agent, backend="subprocess", pid=999999999)
@@ -94,6 +112,57 @@ def test_orphan_reaper_terminalizes_registry_and_session(team_name, isolated_dat
     assert session is not None
     assert session.state["state"] == WORKER_STATE_KILLED_BY_REAPER
     assert session.state["seat_released"] is True
+
+
+def test_stale_live_team_detector_flags_live_unreleased_old_team(team_name, isolated_data_dir):
+    agent = "live-agent"
+    register_agent(team_name, agent, backend="subprocess", pid=os.getpid())
+    _age_registry(team_name, agent, isolated_data_dir)
+    _seed_running_session(team_name, agent)
+    task_store = TaskStore(team_name)
+    task = task_store.create("done work", owner=agent)
+    task_store.update(task.id, status=TaskStatus.completed, force=True)
+
+    candidates = list_stale_live_teams(team_name, max_age_hours=0.5, now=NOW)
+
+    assert len(candidates) == 1
+    assert candidates[0]["team"] == team_name
+    assert candidates[0]["candidate_count"] == 1
+    assert candidates[0]["active_seats"] == 1
+    assert candidates[0]["all_tasks_terminal"] is True
+    assert candidates[0]["task_summary"]["completed"] == 1
+    assert candidates[0]["agents"][0]["agent"] == agent
+    assert candidates[0]["agents"][0]["alive"] is True
+
+
+def test_stale_live_team_detector_skips_dead_orphan_shape(team_name, isolated_data_dir):
+    agent = "dead-agent"
+    register_agent(team_name, agent, backend="subprocess", pid=999999999)
+    _age_registry(team_name, agent, isolated_data_dir)
+    _seed_running_session(team_name, agent)
+
+    candidates = list_stale_live_teams(team_name, max_age_hours=0.5, now=NOW)
+    orphans = list_orphan_workers(team_name, max_age_minutes=30, now=NOW)
+
+    assert candidates == []
+    assert [item["agent"] for item in orphans] == [agent]
+
+
+def test_stale_live_team_detector_flags_legacy_dead_unreleased_row(team_name, isolated_data_dir):
+    agent = "legacy-dead-agent"
+    register_agent(team_name, agent, backend="subprocess", pid=999999999)
+    _strip_registry_lifecycle_fields(team_name, agent, isolated_data_dir)
+
+    candidates = list_stale_live_teams(team_name, max_age_hours=0.5, now=NOW)
+    orphans = list_orphan_workers(team_name, max_age_minutes=30, now=NOW)
+
+    assert len(candidates) == 1
+    assert candidates[0]["reason"] == "legacy-unreleased-no-lifecycle-dead-process"
+    assert candidates[0]["oldest_age_hours"] is None
+    assert candidates[0]["agents"][0]["agent"] == agent
+    assert candidates[0]["agents"][0]["alive"] is False
+    assert candidates[0]["agents"][0]["age_hours"] is None
+    assert orphans == []
 
 
 def test_orphan_reaper_skips_session_only_empirical_shape_without_identity(team_name):
@@ -252,6 +321,28 @@ def test_orphan_clear_defaults_to_dry_run_and_execute_mutates(team_name, isolate
     assert execute.exit_code == 0
     assert json.loads(execute.output)["dry_run"] is False
     assert get_agent_lifecycle(team_name, "orphan")["worker_state"] == WORKER_STATE_KILLED_BY_REAPER
+
+
+def test_stale_live_list_cli_reports_live_candidates(team_name, isolated_data_dir):
+    agent = "live-agent"
+    register_agent(team_name, agent, backend="subprocess", pid=os.getpid())
+    _age_registry(team_name, agent, isolated_data_dir)
+    _seed_running_session(team_name, agent)
+    task_store = TaskStore(team_name)
+    task = task_store.create("done work", owner=agent)
+    task_store.update(task.id, status=TaskStatus.completed, force=True)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["--json", "stale-live-list", "--team", team_name, "--max-hours", "0.5"],
+    )
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data[0]["team"] == team_name
+    assert data[0]["candidate_count"] == 1
+    assert data[0]["reason"] == "stale-live-running-unreleased"
 
 
 def test_launchd_plist_uses_absolute_executable_and_fifteen_minute_interval(tmp_path):
